@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Darkin — Deploy Man</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="brandHomeBtn" class="brand" type="button" title="Về trang chủ">
+          <span class="brand-logo">⚡</span>
+          <div class="brand-text">
+            <span class="brand-name">Darkin</span>
+            <span class="brand-sub">Deploy Man</span>
+          </div>
+        </button>
+        <div class="live-pill" id="liveIndicator" title="Kết nối thời gian thực (SSE)">
+          <span class="live-dot"></span>
+          <span id="liveText">Live</span>
+        </div>
+        <span class="runtime-badge" id="runtimeBadge">Bun</span>
+      </div>
+
+      <div class="topbar-right">
+        <div class="search-box">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <path d="m21 21-4.3-4.3"></path>
+          </svg>
+          <input id="searchInput" type="search" placeholder="Tìm dự án..." autocomplete="off" />
+        </div>
+        <button id="addProjectBtn" class="btn btn-primary" type="button">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+            <path d="M12 5v14M5 12h14"></path>
+          </svg>
+          <span>Thêm dự án</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-container">
+      <!-- OVERVIEW VIEW -->
+      <section id="overviewView">
+        <!-- Stats Row -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Tổng dự án</div>
+            <div class="stat-value" id="statProjects">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Đang chạy / Hàng đợi</div>
+            <div class="stat-value stat-running" id="statRunning">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Deploy thành công</div>
+            <div class="stat-value stat-success" id="statSuccess">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Deploy thất bại</div>
+            <div class="stat-value stat-failed" id="statFailed">0</div>
+          </div>
+        </div>
+
+        <!-- Projects Section -->
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">Danh sách dự án</h2>
+            <p class="section-desc">Quản lý pipeline deploy, chạy thủ công hoặc tự động qua Git Webhook</p>
+          </div>
+          <button id="refreshBtn" class="btn btn-ghost btn-sm" type="button">Làm mới</button>
+        </div>
+
+        <div id="projectsGrid" class="projects-grid"></div>
+
+        <div id="emptyProjects" class="empty-state hidden">
+          <div class="empty-icon">🚀</div>
+          <h3>Chưa có dự án nào</h3>
+          <p>Tạo dự án đầu tiên để bắt đầu deploy nhanh bằng <code>Bun.spawn</code> và nhận Webhook tự động.</p>
+          <button id="emptyAddBtn" class="btn btn-primary" type="button">+ Thêm dự án đầu tiên</button>
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="section-header" style="margin-top: 2rem;">
+          <div>
+            <h2 class="section-title">Hoạt động gần đây</h2>
+          </div>
+        </div>
+        <div class="card table-card">
+          <div id="recentActivityList" class="activity-list">
+            <div class="muted-center">Chưa có lượt deploy nào.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PROJECT DETAIL VIEW -->
+      <section id="detailView" class="hidden">
+        <div class="detail-topbar">
+          <button id="backToOverviewBtn" class="btn btn-ghost btn-sm" type="button">
+            ← Quay lại
+          </button>
+          <div class="detail-actions">
+            <button id="detailWebhookToggleBtn" class="btn btn-ghost btn-sm" type="button">Webhook &amp; Tích hợp</button>
+            <button id="detailEditBtn" class="btn btn-ghost btn-sm" type="button">Sửa cấu hình</button>
+            <button id="detailDeleteBtn" class="btn btn-danger-ghost btn-sm" type="button">Xóa</button>
+            <button id="detailDeployBtn" class="btn btn-primary" type="button">
+              ▶ Deploy ngay
+            </button>
+          </div>
+        </div>
+
+        <div class="detail-header card">
+          <div class="detail-title-row">
+            <div>
+              <div class="detail-name-wrap">
+                <h1 id="detailName">Project Name</h1>
+                <span class="chip chip-mono" id="detailSlug">slug</span>
+                <span class="chip chip-branch" id="detailBranch">main</span>
+                <span class="chip" id="detailAutoDeploy">Auto Webhook</span>
+              </div>
+              <p id="detailDescription" class="detail-desc"></p>
+            </div>
+          </div>
+          <div class="detail-meta-bar">
+            <div class="meta-item">
+              <span class="meta-label">Thư mục:</span>
+              <code id="detailWorkDir"></code>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Shell:</span>
+              <code id="detailShell"></code>
+            </div>
+            <div class="meta-item" id="detailRepoWrap">
+              <span class="meta-label">Repo:</span>
+              <code id="detailRepo"></code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Webhook Integration Panel (collapsible) -->
+        <div id="webhookPanel" class="card webhook-panel hidden">
+          <div class="webhook-panel-header">
+            <div>
+              <h3>Cấu hình Git Webhook</h3>
+              <p class="muted-sm">Hỗ trợ GitHub (<code>x-hub-signature-256</code>), GitLab (<code>x-gitlab-token</code>) và Custom HTTP POST.</p>
+            </div>
+            <div class="webhook-header-actions">
+              <button id="testWebhookBtn" class="btn btn-secondary btn-sm" type="button">⚡ Test Webhook ngay</button>
+              <button id="regenSecretBtn" class="btn btn-ghost btn-sm" type="button">Đổi Secret</button>
+            </div>
+          </div>
+
+          <div class="webhook-grid">
+            <div class="field">
+              <label>Webhook URL</label>
+              <div class="copy-row">
+                <input id="webhookUrlInput" type="text" readonly />
+                <button class="btn btn-ghost btn-sm" type="button" data-copy-target="webhookUrlInput">Copy</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Webhook Secret</label>
+              <div class="copy-row">
+                <input id="webhookSecretInput" type="password" readonly />
+                <button id="toggleSecretBtn" class="btn btn-ghost btn-sm" type="button">Hiện</button>
+                <button class="btn btn-ghost btn-sm" type="button" data-copy-target="webhookSecretInput">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="field" style="margin-top: 0.75rem;">
+            <label>Lệnh cURL kích hoạt nhanh</label>
+            <div class="copy-row">
+              <input id="webhookCurlInput" type="text" readonly class="mono" />
+              <button class="btn btn-ghost btn-sm" type="button" data-copy-target="webhookCurlInput">Copy</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Split Workspace: Build History + Live Console -->
+        <div class="detail-split">
+          <div class="card builds-sidebar">
+            <div class="panel-header">
+              <h3>Lịch sử Build</h3>
+              <button id="clearHistoryBtn" class="btn btn-ghost btn-xs" type="button" title="Xóa các build đã hoàn thành">Dọn dẹp</button>
+            </div>
+            <div id="buildsList" class="builds-list">
+              <div class="muted-center">Chưa có build nào.</div>
+            </div>
+          </div>
+
+          <div class="card console-panel">
+            <div class="console-header">
+              <div class="console-title-wrap">
+                <span class="console-build-id" id="consoleBuildTitle">Console Output</span>
+                <span id="consoleStatusBadge" class="badge hidden"></span>
+                <span id="consoleMetaText" class="muted-sm"></span>
+              </div>
+              <div class="console-controls">
+                <button id="cancelBuildBtn" class="btn btn-danger btn-xs hidden" type="button">■ Hủy Build</button>
+                <label class="toggle-inline">
+                  <input type="checkbox" id="autoScrollToggle" checked />
+                  <span>Auto-scroll</span>
+                </label>
+                <button id="copyLogsBtn" class="btn btn-ghost btn-xs" type="button">Copy</button>
+                <button id="downloadLogsBtn" class="btn btn-ghost btn-xs" type="button">Tải .log</button>
+              </div>
+            </div>
+            <pre id="consoleOutput" class="console-output">Chọn một build bên trái hoặc bấm "Deploy ngay" để xem logs trực tiếp...</pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ADD / EDIT PROJECT MODAL -->
+  <div id="projectModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="projectModalTitle">Thêm dự án mới</h2>
+        <button id="closeProjectModalBtn" class="icon-btn" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <form id="projectForm" class="modal-body">
+        <input type="hidden" id="projectIdField" />
+
+        <div class="form-row-2">
+          <div class="field">
+            <label for="projectNameInput">Tên dự án <span class="req">*</span></label>
+            <input id="projectNameInput" type="text" required placeholder="VD: Backend API Production" />
+          </div>
+          <div class="field">
+            <label for="projectSlugInput">Slug (URL Webhook)</label>
+            <input id="projectSlugInput" type="text" placeholder="tu-dong-tao-tu-ten" />
+            <span class="field-hint">Endpoint: <code id="slugPreview">/webhook/...</code></span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="projectDescInput">Mô tả ngắn</label>
+          <input id="projectDescInput" type="text" placeholder="VD: API chính chạy bằng Bun + Elysia trên port 3000" />
+        </div>
+
+        <div class="field">
+          <label for="projectWorkDirInput">Thư mục làm việc trên server (WorkDir) <span class="req">*</span></label>
+          <div class="input-action-row">
+            <input id="projectWorkDirInput" type="text" required placeholder="VD: /var/www/my-app hoặc D:\work\my-app" class="mono" />
+            <button id="checkDirBtn" class="btn btn-secondary btn-sm" type="button">Kiểm tra</button>
+          </div>
+          <div id="dirCheckResult" class="dir-check-status"></div>
+        </div>
+
+        <div class="form-row-3">
+          <div class="field">
+            <label for="projectBranchInput">Branch mục tiêu</label>
+            <input id="projectBranchInput" type="text" value="main" placeholder="main (hoặc * cho mọi branch)" />
+          </div>
+          <div class="field">
+            <label for="projectShellInput">Shell thực thi</label>
+            <select id="projectShellInput">
+              <option value="auto">Auto (OS mặc định)</option>
+              <option value="sh">sh (Linux/macOS)</option>
+              <option value="bash">bash</option>
+              <option value="cmd">cmd (Windows)</option>
+              <option value="powershell">PowerShell (Windows)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="projectTimeoutInput">Timeout (giây)</label>
+            <input id="projectTimeoutInput" type="number" min="10" max="86400" value="600" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="projectRepoInput">Git Repository URL (tùy chọn)</label>
+          <input id="projectRepoInput" type="text" placeholder="https://github.com/org/repo.git" class="mono" />
+        </div>
+
+        <div class="field">
+          <div class="label-with-presets">
+            <label for="projectCommandsInput">Các lệnh Deploy (Pipeline Steps) <span class="req">*</span></label>
+            <div class="preset-pills">
+              <span class="preset-label">Mẫu nhanh:</span>
+              <button type="button" class="pill-btn" data-preset="bun">Bun / Elysia</button>
+              <button type="button" class="pill-btn" data-preset="node">Node / Next</button>
+              <button type="button" class="pill-btn" data-preset="docker">Docker</button>
+              <button type="button" class="pill-btn" data-preset="demo">Demo Test</button>
+            </div>
+          </div>
+          <textarea
+            id="projectCommandsInput"
+            rows="6"
+            required
+            class="mono code-textarea"
+            placeholder="# Mỗi dòng là 1 step, dừng ngay nếu step lỗi&#10;git pull origin main&#10;bun install&#10;bun run build"
+          ></textarea>
+          <span class="field-hint">Mỗi dòng là một bước chạy tuần tự qua <code>Bun.spawn</code>. Dòng bắt đầu bằng <code>#</code> sẽ được bỏ qua.</span>
+        </div>
+
+        <div class="field">
+          <label for="projectEnvInput">Biến môi trường bổ sung (KEY=VALUE, mỗi dòng 1 biến)</label>
+          <textarea
+            id="projectEnvInput"
+            rows="3"
+            class="mono code-textarea"
+            placeholder="NODE_ENV=production&#10;PORT=3000"
+          ></textarea>
+        </div>
+
+        <div class="form-row-2 form-align-center">
+          <label class="checkbox-card">
+            <input id="projectAutoDeployInput" type="checkbox" checked />
+            <div>
+              <strong>Bật tự động deploy qua Webhook</strong>
+              <span>Cho phép GitHub / GitLab / HTTP kích hoạt build tự động</span>
+            </div>
+          </label>
+          <div class="field">
+            <label for="projectSecretInput">Webhook Secret (để trống để tự tạo)</label>
+            <input id="projectSecretInput" type="text" class="mono" placeholder="Tự động sinh mã ngẫu nhiên an toàn" />
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="cancelProjectModalBtn" class="btn btn-ghost" type="button">Hủy</button>
+          <button id="saveProjectBtn" class="btn btn-primary" type="submit">Lưu dự án</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- AUTH TOKEN MODAL (Only shown if DARKIN_TOKEN is enabled on server) -->
+  <div id="authModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-header">
+        <h2>Xác thực Darkin</h2>
+      </div>
+      <form id="authForm" class="modal-body">
+        <p class="muted-sm">Server đang bật bảo vệ bằng <code>DARKIN_TOKEN</code>. Nhập token để tiếp tục.</p>
+        <div class="field">
+          <label for="authTokenInput">Access Token</label>
+          <input id="authTokenInput" type="password" required placeholder="Nhập DARKIN_TOKEN..." />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" type="submit">Đăng nhập</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

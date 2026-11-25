@@ -1,0 +1,29 @@
+services:
+  darkin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: darkin:latest
+    container_name: darkin
+    restart: unless-stopped
+    ports:
+      - "${PORT:-7554}:7554"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 7554
+      DARKIN_DB: /app/data/darkin.sqlite
+      DARKIN_WORKDIR: /www/wwwroot
+      DARKIN_TOKEN: ${DARKIN_TOKEN:-}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+    volumes:
+      # Lưu trữ SQLite (cấu hình dự án & lịch sử build)
+      - darkin_data:/app/data
+      # Thư mục chứa các dự án cần deploy (đổi DARKIN_PROJECTS_DIR trong .env theo đường dẫn trên máy/VPS)
+      - /www/wwwroot:/www/wwwroot
+      # Bỏ comment dòng dưới nếu muốn Darkin chạy được `docker` / `docker compose` trên host:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Bỏ comment dòng dưới nếu cần dùng SSH key của host cho git pull / ssh deploy:
+      - ~/.ssh:/root/.ssh:ro
+
+volumes:
+  darkin_data:
