@@ -6,6 +6,8 @@ services:
     image: darkin:latest
     container_name: darkin
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${PORT:-7554}:7554"
     environment:

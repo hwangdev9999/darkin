@@ -8,6 +8,7 @@ import {
   type DeploymentSummary,
   type Project,
   type ProjectWithStats,
+  type RunMode,
   type ShellType,
   type TriggerType,
   type UpdateProjectInput,
@@ -34,6 +35,7 @@ db.exec(`
     branch TEXT NOT NULL DEFAULT 'main',
     work_dir TEXT NOT NULL,
     commands TEXT NOT NULL,
+    run_mode TEXT NOT NULL DEFAULT 'steps',
     env_vars TEXT NOT NULL DEFAULT '',
     shell TEXT NOT NULL DEFAULT 'auto',
     webhook_secret TEXT NOT NULL,
@@ -68,6 +70,12 @@ db.exec(`
     ON deployments(created_at DESC);
 `);
 
+// Auto-migrate existing SQLite databases
+const projectColumns = db.query(`PRAGMA table_info(projects)`).all() as { name: string }[];
+if (!projectColumns.some((c) => c.name === "run_mode")) {
+  db.exec(`ALTER TABLE projects ADD COLUMN run_mode TEXT NOT NULL DEFAULT 'steps'`);
+}
+
 interface ProjectRow {
   id: string;
   name: string;
@@ -77,6 +85,7 @@ interface ProjectRow {
   branch: string;
   work_dir: string;
   commands: string;
+  run_mode: string;
   env_vars: string;
   shell: string;
   webhook_secret: string;
@@ -114,6 +123,7 @@ function mapProject(row: ProjectRow): Project {
     branch: row.branch,
     workDir: row.work_dir,
     commands: row.commands,
+    runMode: row.run_mode === "script" ? "script" : "steps",
     envVars: row.env_vars,
     shell: (row.shell as ShellType) || "auto",
     webhookSecret: row.webhook_secret,
@@ -272,6 +282,7 @@ export function createProject(input: CreateProjectInput): Project {
     branch: (input.branch ?? "main").trim(),
     workDir: input.workDir.trim(),
     commands: input.commands.trim(),
+    runMode: input.runMode === "script" ? "script" : "steps",
     envVars: input.envVars ?? "",
     shell: input.shell ?? "auto",
     webhookSecret: input.webhookSecret?.trim() || generateSecret(),
@@ -284,9 +295,9 @@ export function createProject(input: CreateProjectInput): Project {
   db.query(
     `INSERT INTO projects (
       id, name, slug, description, repo_url, branch, work_dir,
-      commands, env_vars, shell, webhook_secret, auto_deploy,
+      commands, run_mode, env_vars, shell, webhook_secret, auto_deploy,
       timeout_sec, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     project.id,
     project.name,
@@ -296,6 +307,7 @@ export function createProject(input: CreateProjectInput): Project {
     project.branch,
     project.workDir,
     project.commands,
+    project.runMode,
     project.envVars,
     project.shell,
     project.webhookSecret,
@@ -334,6 +346,12 @@ export function updateProject(id: string, input: UpdateProjectInput): Project | 
     branch: input.branch !== undefined ? input.branch.trim() : existing.branch,
     workDir: input.workDir !== undefined ? input.workDir.trim() : existing.workDir,
     commands: input.commands !== undefined ? input.commands.trim() : existing.commands,
+    runMode:
+      input.runMode !== undefined
+        ? input.runMode === "script"
+          ? "script"
+          : "steps"
+        : existing.runMode,
     envVars: input.envVars !== undefined ? input.envVars : existing.envVars,
     shell: input.shell !== undefined ? input.shell : existing.shell,
     webhookSecret:
@@ -351,7 +369,7 @@ export function updateProject(id: string, input: UpdateProjectInput): Project | 
   db.query(
     `UPDATE projects SET
       name = ?, slug = ?, description = ?, repo_url = ?, branch = ?,
-      work_dir = ?, commands = ?, env_vars = ?, shell = ?,
+      work_dir = ?, commands = ?, run_mode = ?, env_vars = ?, shell = ?,
       webhook_secret = ?, auto_deploy = ?, timeout_sec = ?, updated_at = ?
      WHERE id = ?`
   ).run(
@@ -362,6 +380,7 @@ export function updateProject(id: string, input: UpdateProjectInput): Project | 
     updated.branch,
     updated.workDir,
     updated.commands,
+    updated.runMode,
     updated.envVars,
     updated.shell,
     updated.webhookSecret,

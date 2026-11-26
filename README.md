@@ -5,7 +5,9 @@ Hệ thống CI/CD & Auto-Deploy nhẹ, gọn thay thế Jenkins, không thư vi
 ## Tính năng chính
 
 - **Giao diện Web UI trực quan**: Thêm/sửa/xóa dự án, kiểm tra nhanh đường dẫn thư mục & Git branch trên server, có sẵn các mẫu lệnh (Bun/Elysia, Node/Next.js, Docker Compose, Demo).
-- **Chạy lệnh tuần tự bằng `Bun.spawn`**: Mỗi dòng là một step, dừng ngay khi có lỗi (fail-fast), hỗ trợ `auto`, `sh`, `bash`, `cmd`, `powershell`, biến môi trường riêng và timeout.
+- **2 chế độ thực thi bằng `Bun.spawn`**:
+  - **Step Mode**: Chạy tuần tự từng dòng, dừng ngay khi có lỗi (fail-fast).
+  - **Script Mode**: Chạy nguyên nội dung như một Shell Script hoàn chỉnh (giữ nguyên `cd`, biến `$VAR`, `if/else`, `for`, hỗ trợ shebang `#!` và `bash -e -o pipefail` trên Linux), kèm chọn shell (`auto`, `bash`, `sh`, `cmd`, `powershell`), biến môi trường riêng và timeout.
 - **Hàng đợi theo từng dự án**: Tránh 2 build của cùng 1 dự án chạy đè lên nhau, hỗ trợ **Hủy build (Cancel)** khi đang chạy.
 - **Xem Console Logs trực tiếp (SSE)**: Stream `stdout`/`stderr` real-time lên trình duyệt, hỗ trợ copy và tải file `.log`.
 - **Git Webhook tích hợp sẵn**:

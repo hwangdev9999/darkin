@@ -28,6 +28,23 @@ pm2 reload all`,
     docker: `git pull origin main
 docker compose build
 docker compose up -d --remove-orphans`,
+    script: {
+      runMode: "script",
+      commands: `echo "=== Deploying $DARKIN_PROJECT (build #$DARKIN_BUILD_NUMBER) ==="
+git pull origin "$DARKIN_BRANCH"
+
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "n/a")
+echo "Current commit: $COMMIT"
+
+if [ -f "bun.lock" ] || [ -f "bun.lockb" ]; then
+  bun install --frozen-lockfile
+elif [ -f "package-lock.json" ]; then
+  npm ci
+fi
+
+# Thêm lệnh build / restart service của bạn tại đây
+echo "Deploy finished!"`,
+    },
     demo: () =>
       state.serverInfo?.platform === "win32"
         ? `echo === Darkin Deploy Test ===
@@ -157,13 +174,17 @@ echo "Done!"`,
       .map((line, idx, arr) => {
         const escaped = escapeHtml(line);
         const suffix = idx < arr.length - 1 ? "\n" : "";
-        if (line.startsWith("▶ [Step")) {
+        if (line.startsWith("▶ [Step") || line.startsWith("▶ [Script")) {
           return `<span class="log-step">${escaped}</span>${suffix}`;
         }
-        if (line.startsWith("✔ [Step")) {
+        if (line.startsWith("✔ [Step") || line.startsWith("✔ [Script")) {
           return `<span class="log-ok">${escaped}</span>${suffix}`;
         }
-        if (line.startsWith("✖ [Step") || line.includes("[darkin] ERROR:")) {
+        if (
+          line.startsWith("✖ [Step") ||
+          line.startsWith("✖ [Script") ||
+          line.includes("[darkin] ERROR:")
+        ) {
           return `<span class="log-err">${escaped}</span>${suffix}`;
         }
         if (line.startsWith("[darkin]")) {
@@ -332,6 +353,7 @@ echo "Done!"`,
                 <div class="project-slug-row">
                   <span class="chip chip-mono">/${escapeHtml(p.slug)}</span>
                   ${p.branch ? `<span class="chip chip-branch">⎇ ${escapeHtml(p.branch)}</span>` : ""}
+                  ${p.runMode === "script" ? `<span class="chip chip-script">Script</span>` : ""}
                   ${p.autoDeploy ? `<span class="chip chip-auto">Webhook</span>` : ""}
                 </div>
               </div>
@@ -398,11 +420,14 @@ echo "Done!"`,
     $("detailName").textContent = p.name;
     $("detailSlug").textContent = `/${p.slug}`;
     $("detailBranch").textContent = `⎇ ${p.branch || "*"}`;
+    const isScript = p.runMode === "script";
+    $("detailRunMode").textContent = isScript ? "Script Mode" : "Step Mode";
+    $("detailRunMode").className = `chip ${isScript ? "chip-script" : ""}`;
     $("detailAutoDeploy").textContent = p.autoDeploy ? "Webhook: Bật" : "Webhook: Tắt";
     $("detailAutoDeploy").className = `chip ${p.autoDeploy ? "chip-auto" : ""}`;
     $("detailDescription").textContent = p.description || "Không có mô tả";
     $("detailWorkDir").textContent = p.workDir;
-    $("detailShell").textContent = `${p.shell} (timeout ${p.timeoutSec}s)`;
+    $("detailShell").textContent = `${p.shell} · ${isScript ? "script" : "steps"} (timeout ${p.timeoutSec}s)`;
 
     if (p.repoUrl) {
       $("detailRepoWrap").classList.remove("hidden");
@@ -625,6 +650,7 @@ echo "Done!"`,
     $("projectDescInput").value = project?.description || "";
     $("projectWorkDirInput").value = project?.workDir || state.serverInfo?.cwd || "";
     $("projectBranchInput").value = project?.branch ?? "main";
+    $("projectRunModeInput").value = project?.runMode === "script" ? "script" : "steps";
     $("projectShellInput").value = project?.shell || "auto";
     $("projectTimeoutInput").value = project?.timeoutSec ?? 600;
     $("projectRepoInput").value = project?.repoUrl || "";
@@ -636,6 +662,7 @@ echo "Done!"`,
 
     state.slugManuallyEdited = isEdit;
     updateSlugPreview();
+    updateRunModeHint();
 
     $("projectModal").classList.remove("hidden");
     setTimeout(() => $("projectNameInput").focus(), 30);
@@ -650,6 +677,26 @@ echo "Done!"`,
     $("slugPreview").textContent = `/webhook/${slug || "ten-du-an"}`;
   }
 
+  function updateRunModeHint() {
+    const mode = $("projectRunModeInput").value;
+    const label = $("commandsLabel");
+    const textarea = $("projectCommandsInput");
+    const hint = $("commandsHint");
+    if (mode === "script") {
+      label.innerHTML = 'Nội dung Shell Script (Script Mode) <span class="req">*</span>';
+      textarea.placeholder =
+        '#!/usr/bin/env bash\n# Chạy nguyên script trong 1 phiên shell duy nhất\ncd app\nTAG=$(git rev-parse --short HEAD)\necho "Deploying $TAG"';
+      hint.innerHTML =
+        'Chạy toàn bộ nội dung như một <strong>file script duy nhất</strong> (giữ nguyên <code>cd</code>, biến <code>$VAR</code>, <code>if/else</code>, <code>for</code>, hỗ trợ shebang <code>#!</code> và tự dừng khi có lệnh lỗi với <code>bash -e -o pipefail</code>).';
+    } else {
+      label.innerHTML = 'Các lệnh Deploy (Pipeline Steps) <span class="req">*</span>';
+      textarea.placeholder =
+        "# Mỗi dòng là 1 step, dừng ngay nếu step lỗi\ngit pull origin main\nbun install\nbun run build";
+      hint.innerHTML =
+        'Mỗi dòng là một bước chạy tuần tự qua <code>Bun.spawn</code>. Dòng bắt đầu bằng <code>#</code> sẽ được bỏ qua.';
+    }
+  }
+
   async function saveProjectForm(e) {
     e.preventDefault();
     const id = $("projectIdField").value.trim();
@@ -659,6 +706,7 @@ echo "Done!"`,
       description: $("projectDescInput").value.trim(),
       workDir: $("projectWorkDirInput").value.trim(),
       branch: $("projectBranchInput").value.trim(),
+      runMode: $("projectRunModeInput").value,
       shell: $("projectShellInput").value,
       timeoutSec: Number($("projectTimeoutInput").value) || 600,
       repoUrl: $("projectRepoInput").value.trim(),
@@ -757,6 +805,7 @@ echo "Done!"`,
       state.slugManuallyEdited = true;
       updateSlugPreview();
     });
+    $("projectRunModeInput").addEventListener("change", updateRunModeHint);
     $("checkDirBtn").addEventListener("click", checkWorkDir);
 
     // Command Presets
@@ -765,8 +814,16 @@ echo "Done!"`,
         const key = btn.getAttribute("data-preset");
         const preset = COMMAND_PRESETS[key];
         if (preset) {
-          $("projectCommandsInput").value =
-            typeof preset === "function" ? preset() : preset;
+          if (typeof preset === "object" && preset.commands) {
+            $("projectCommandsInput").value = preset.commands;
+            if (preset.runMode) {
+              $("projectRunModeInput").value = preset.runMode;
+              updateRunModeHint();
+            }
+          } else {
+            $("projectCommandsInput").value =
+              typeof preset === "function" ? preset() : preset;
+          }
           showToast(`Đã áp dụng mẫu lệnh "${btn.textContent}"`);
         }
       });

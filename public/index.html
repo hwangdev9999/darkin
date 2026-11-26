@@ -120,6 +120,7 @@
                 <h1 id="detailName">Project Name</h1>
                 <span class="chip chip-mono" id="detailSlug">slug</span>
                 <span class="chip chip-branch" id="detailBranch">main</span>
+                <span class="chip" id="detailRunMode">Steps</span>
                 <span class="chip" id="detailAutoDeploy">Auto Webhook</span>
               </div>
               <p id="detailDescription" class="detail-desc"></p>
@@ -253,17 +254,27 @@
           <div id="dirCheckResult" class="dir-check-status"></div>
         </div>
 
-        <div class="form-row-3">
+        <div class="form-row-2">
           <div class="field">
             <label for="projectBranchInput">Branch mục tiêu</label>
             <input id="projectBranchInput" type="text" value="main" placeholder="main (hoặc * cho mọi branch)" />
           </div>
           <div class="field">
+            <label for="projectRunModeInput">Chế độ thực thi (Run Mode)</label>
+            <select id="projectRunModeInput">
+              <option value="steps">Steps — Chạy từng dòng riêng lẻ</option>
+              <option value="script">Script Mode — Chạy nguyên Shell Script (tự do)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row-3">
+          <div class="field">
             <label for="projectShellInput">Shell thực thi</label>
             <select id="projectShellInput">
               <option value="auto">Auto (OS mặc định)</option>
-              <option value="sh">sh (Linux/macOS)</option>
               <option value="bash">bash</option>
+              <option value="sh">sh (Linux/macOS)</option>
               <option value="cmd">cmd (Windows)</option>
               <option value="powershell">PowerShell (Windows)</option>
             </select>
@@ -272,32 +283,32 @@
             <label for="projectTimeoutInput">Timeout (giây)</label>
             <input id="projectTimeoutInput" type="number" min="10" max="86400" value="600" />
           </div>
-        </div>
-
-        <div class="field">
-          <label for="projectRepoInput">Git Repository URL (tùy chọn)</label>
-          <input id="projectRepoInput" type="text" placeholder="https://github.com/org/repo.git" class="mono" />
+          <div class="field">
+            <label for="projectRepoInput">Git Repo URL (tùy chọn)</label>
+            <input id="projectRepoInput" type="text" placeholder="https://github.com/org/repo.git" class="mono" />
+          </div>
         </div>
 
         <div class="field">
           <div class="label-with-presets">
-            <label for="projectCommandsInput">Các lệnh Deploy (Pipeline Steps) <span class="req">*</span></label>
+            <label id="commandsLabel" for="projectCommandsInput">Các lệnh Deploy (Pipeline Steps) <span class="req">*</span></label>
             <div class="preset-pills">
               <span class="preset-label">Mẫu nhanh:</span>
               <button type="button" class="pill-btn" data-preset="bun">Bun / Elysia</button>
               <button type="button" class="pill-btn" data-preset="node">Node / Next</button>
               <button type="button" class="pill-btn" data-preset="docker">Docker</button>
+              <button type="button" class="pill-btn" data-preset="script">Bash Script</button>
               <button type="button" class="pill-btn" data-preset="demo">Demo Test</button>
             </div>
           </div>
           <textarea
             id="projectCommandsInput"
-            rows="6"
+            rows="7"
             required
             class="mono code-textarea"
             placeholder="# Mỗi dòng là 1 step, dừng ngay nếu step lỗi&#10;git pull origin main&#10;bun install&#10;bun run build"
           ></textarea>
-          <span class="field-hint">Mỗi dòng là một bước chạy tuần tự qua <code>Bun.spawn</code>. Dòng bắt đầu bằng <code>#</code> sẽ được bỏ qua.</span>
+          <span id="commandsHint" class="field-hint">Mỗi dòng là một bước chạy tuần tự qua <code>Bun.spawn</code>. Dòng bắt đầu bằng <code>#</code> sẽ được bỏ qua.</span>
         </div>
 
         <div class="field">

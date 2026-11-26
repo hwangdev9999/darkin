@@ -475,6 +475,12 @@ code,
   background: var(--success-soft);
 }
 
+.chip-script {
+  color: var(--info);
+  border-color: rgba(56, 189, 248, 0.35);
+  background: var(--info-soft);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

@@ -63,6 +63,8 @@ const ShellSchema = t.Union([
   t.Literal("powershell"),
 ]);
 
+const RunModeSchema = t.Union([t.Literal("steps"), t.Literal("script")]);
+
 const app = new Elysia()
   // Serve Web UI
   .get("/", () => Bun.file(join(PUBLIC_DIR, "index.html")))
@@ -251,6 +253,7 @@ const app = new Elysia()
             branch: t.Optional(t.String()),
             workDir: t.String({ minLength: 1 }),
             commands: t.String({ minLength: 1 }),
+            runMode: t.Optional(RunModeSchema),
             envVars: t.Optional(t.String()),
             shell: t.Optional(ShellSchema),
             webhookSecret: t.Optional(t.String()),
@@ -298,6 +301,7 @@ const app = new Elysia()
             branch: t.Optional(t.String()),
             workDir: t.Optional(t.String({ minLength: 1 })),
             commands: t.Optional(t.String({ minLength: 1 })),
+            runMode: t.Optional(RunModeSchema),
             envVars: t.Optional(t.String()),
             shell: t.Optional(ShellSchema),
             webhookSecret: t.Optional(t.String()),

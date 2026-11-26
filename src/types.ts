@@ -1,5 +1,7 @@
 export type ShellType = "auto" | "sh" | "bash" | "cmd" | "powershell";
 
+export type RunMode = "steps" | "script";
+
 export type DeploymentStatus =
   | "queued"
   | "running"
@@ -22,6 +24,7 @@ export interface Project {
   branch: string;
   workDir: string;
   commands: string;
+  runMode: RunMode;
   envVars: string;
   shell: ShellType;
   webhookSecret: string;
@@ -67,6 +70,7 @@ export interface CreateProjectInput {
   branch?: string;
   workDir: string;
   commands: string;
+  runMode?: RunMode;
   envVars?: string;
   shell?: ShellType;
   webhookSecret?: string;
@@ -82,6 +86,7 @@ export interface UpdateProjectInput {
   branch?: string;
   workDir?: string;
   commands?: string;
+  runMode?: RunMode;
   envVars?: string;
   shell?: ShellType;
   webhookSecret?: string;

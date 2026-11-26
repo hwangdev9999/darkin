@@ -1,4 +1,6 @@
-import { existsSync, statSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createDeploymentRecord,
   getDeploymentById,
@@ -153,6 +155,83 @@ function buildShellCommand(shell: ShellType, command: string): string[] {
     case "sh":
     default:
       return ["sh", "-c", command];
+  }
+}
+
+function prepareScriptExecution(
+  shell: ShellType,
+  rawScript: string,
+  deploymentId: string
+): { cmdArgs: string[]; scriptPath: string; displayRunner: string } {
+  const isWin = process.platform === "win32";
+  const effective: Exclude<ShellType, "auto"> =
+    shell === "auto"
+      ? isWin
+        ? "cmd"
+        : existsSync("/bin/bash")
+        ? "bash"
+        : "sh"
+      : shell;
+
+  // Normalize line endings so scripts pasted from Windows browsers run cleanly on Linux
+  const normalizedUnix = rawScript.replace(/\r\n/g, "\n");
+
+  if (!isWin && shell === "auto" && normalizedUnix.startsWith("#!")) {
+    const scriptPath = join(tmpdir(), `darkin-${deploymentId}.sh`);
+    writeFileSync(scriptPath, normalizedUnix + "\n", { encoding: "utf8", mode: 0o700 });
+    chmodSync(scriptPath, 0o700);
+    const firstLine = normalizedUnix.split("\n")[0]?.trim() || "#!";
+    return { cmdArgs: [scriptPath], scriptPath, displayRunner: firstLine };
+  }
+
+  switch (effective) {
+    case "cmd": {
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.cmd`);
+      const content = rawScript.replace(/\r?\n/g, "\r\n") + "\r\n";
+      writeFileSync(scriptPath, content, "utf8");
+      return {
+        cmdArgs: ["cmd", "/c", scriptPath],
+        scriptPath,
+        displayRunner: "cmd /c",
+      };
+    }
+    case "powershell": {
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.ps1`);
+      const content = `$ErrorActionPreference = 'Stop'\r\n${rawScript.replace(/\r?\n/g, "\r\n")}\r\n`;
+      writeFileSync(scriptPath, content, "utf8");
+      return {
+        cmdArgs: [
+          "powershell",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          scriptPath,
+        ],
+        scriptPath,
+        displayRunner: "powershell -File",
+      };
+    }
+    case "bash": {
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.sh`);
+      writeFileSync(scriptPath, normalizedUnix + "\n", "utf8");
+      return {
+        cmdArgs: ["bash", "-e", "-o", "pipefail", scriptPath],
+        scriptPath,
+        displayRunner: "bash -e -o pipefail",
+      };
+    }
+    case "sh":
+    default: {
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.sh`);
+      writeFileSync(scriptPath, normalizedUnix + "\n", "utf8");
+      return {
+        cmdArgs: ["sh", "-e", scriptPath],
+        scriptPath,
+        displayRunner: "sh -e",
+      };
+    }
   }
 }
 
@@ -424,11 +503,13 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
     });
   };
 
+  const runMode = project.runMode === "script" ? "script" : "steps";
+
   appendLog(
     `[darkin] Starting build #${deployment.buildNumber} for "${project.name}" (${project.slug})\n` +
       `[darkin] Trigger: ${deployment.trigger} by ${deployment.triggeredBy || "system"}\n` +
       `[darkin] WorkDir: ${project.workDir}\n` +
-      `[darkin] Shell: ${project.shell} (${process.platform}) | Timeout: ${project.timeoutSec}s\n` +
+      `[darkin] Mode: ${runMode} | Shell: ${project.shell} (${process.platform}) | Timeout: ${project.timeoutSec}s\n` +
       (deployment.branch ? `[darkin] Branch: ${deployment.branch}\n` : "") +
       (deployment.commitHash
         ? `[darkin] Commit: ${deployment.commitHash.slice(0, 8)} ${deployment.commitMessage}\n`
@@ -445,8 +526,15 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
     return;
   }
 
-  const steps = parseCommandSteps(project.commands);
-  if (steps.length === 0) {
+  const trimmedScript = project.commands.trim();
+  if (!trimmedScript) {
+    appendLog(`\n[darkin] ERROR: No executable commands configured.\n`);
+    finish("failed", 1);
+    return;
+  }
+
+  const steps = runMode === "steps" ? parseCommandSteps(project.commands) : [];
+  if (runMode === "steps" && steps.length === 0) {
     appendLog(`\n[darkin] ERROR: No executable commands configured.\n`);
     finish("failed", 1);
     return;
@@ -477,7 +565,62 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
     }
   }, project.timeoutSec * 1000);
 
+  let tempScriptPath: string | null = null;
   try {
+    if (runMode === "script") {
+      if (cancelledDeployments.has(deploymentId)) {
+        appendLog(`\n[darkin] Build cancelled by user.\n`);
+        finish("cancelled", null);
+        return;
+      }
+
+      const prepared = prepareScriptExecution(project.shell, trimmedScript, deploymentId);
+      tempScriptPath = prepared.scriptPath;
+
+      const scriptStart = Date.now();
+      appendLog(`\n▶ [Script] Running full script via ${prepared.displayRunner}\n`);
+
+      const proc = Bun.spawn(prepared.cmdArgs, {
+        cwd: project.workDir,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      activeProcs.set(deploymentId, proc);
+
+      await Promise.all([
+        pipeStream(proc.stdout, appendLog),
+        pipeStream(proc.stderr, appendLog),
+      ]);
+
+      const exitCode = await proc.exited;
+      activeProcs.delete(deploymentId);
+
+      const scriptDur = ((Date.now() - scriptStart) / 1000).toFixed(2);
+
+      if (cancelledDeployments.has(deploymentId)) {
+        appendLog(`\n[darkin] Script stopped (cancelled by user).\n`);
+        finish("cancelled", exitCode);
+        return;
+      }
+
+      if (timedOut) {
+        finish("failed", 124);
+        return;
+      }
+
+      if (exitCode !== 0) {
+        appendLog(`\n✖ [Script] Failed with exit code ${exitCode} (${scriptDur}s)\n`);
+        finish("failed", exitCode);
+        return;
+      }
+
+      appendLog(`✔ [Script] Completed (${scriptDur}s)\n`);
+      finish("success", 0);
+      return;
+    }
+
     for (let i = 0; i < steps.length; i++) {
       if (cancelledDeployments.has(deploymentId)) {
         appendLog(`\n[darkin] Build cancelled by user.\n`);
@@ -542,5 +685,12 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
     finish("failed", 1);
   } finally {
     clearTimeout(timeoutHandle);
+    if (tempScriptPath) {
+      try {
+        rmSync(tempScriptPath, { force: true });
+      } catch {
+        // Ignore cleanup failure
+      }
+    }
   }
 }
