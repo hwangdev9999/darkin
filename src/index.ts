@@ -23,11 +23,25 @@ import {
   subscribeGlobal,
 } from "./runner";
 import { generateSecret } from "./types";
+import {
+  SECURITY_HEADERS,
+  SESSION_COOKIE_NAME,
+  buildClearSessionCookie,
+  buildSessionCookie,
+  clearAuthFailures,
+  deriveSessionValue,
+  getClientKey,
+  getRateLimitRemainingSec,
+  parseCookie,
+  recordAuthFailure,
+  safeEqual,
+} from "./security";
 import { handleWebhookRequest } from "./webhook";
 
 const HOST = Bun.env.HOST ?? "0.0.0.0";
 const PORT = Number(Bun.env.PORT ?? 7554);
 const AUTH_TOKEN = Bun.env.DARKIN_TOKEN?.trim() || "";
+const EXPECTED_SESSION = AUTH_TOKEN ? deriveSessionValue(AUTH_TOKEN) : "";
 const DEFAULT_WORKDIR = Bun.env.DARKIN_WORKDIR?.trim() || process.cwd();
 const PUBLIC_DIR = resolve(import.meta.dir, "..", "public");
 
@@ -36,18 +50,41 @@ if (recovered > 0) {
   console.log(`[darkin] Recovered ${recovered} interrupted deployment(s).`);
 }
 
-function isAuthorized(request: Request, query: Record<string, string | undefined>): boolean {
-  if (!AUTH_TOKEN) return true;
+function checkAuthorization(request: Request): {
+  ok: boolean;
+  rateLimitedSec?: number;
+} {
+  if (!AUTH_TOKEN) return { ok: true };
+
+  const clientKey = getClientKey(request);
+  const waitSec = getRateLimitRemainingSec(clientKey);
+  if (waitSec > 0) {
+    return { ok: false, rateLimitedSec: waitSec };
+  }
+
+  const cookieVal = parseCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME);
+  if (cookieVal && safeEqual(cookieVal, EXPECTED_SESSION)) {
+    return { ok: true };
+  }
+
   const headerToken =
     request.headers.get("x-darkin-token") ??
     request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (headerToken === AUTH_TOKEN) return true;
-  if (query.token === AUTH_TOKEN) return true;
-  return false;
+
+  if (headerToken) {
+    if (safeEqual(headerToken, AUTH_TOKEN)) {
+      clearAuthFailures(clientKey);
+      return { ok: true };
+    }
+    recordAuthFailure(clientKey);
+  }
+
+  return { ok: false };
 }
 
 function sseHeaders(): HeadersInit {
   return {
+    ...SECURITY_HEADERS,
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
@@ -66,29 +103,86 @@ const ShellSchema = t.Union([
 const RunModeSchema = t.Union([t.Literal("steps"), t.Literal("script")]);
 
 const app = new Elysia()
+  .onAfterHandle(({ set }) => {
+    for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
+      if (!set.headers[key]) {
+        set.headers[key] = value;
+      }
+    }
+  })
+
   // Serve Web UI
-  .get("/", () => Bun.file(join(PUBLIC_DIR, "index.html")))
+  .get("/", () =>
+    new Response(Bun.file(join(PUBLIC_DIR, "index.html")), {
+      headers: {
+        ...SECURITY_HEADERS,
+        "Content-Type": "text/html; charset=utf-8",
+      },
+    })
+  )
   .get("/assets/styles.css", () =>
     new Response(Bun.file(join(PUBLIC_DIR, "styles.css")), {
-      headers: { "Content-Type": "text/css; charset=utf-8" },
+      headers: {
+        ...SECURITY_HEADERS,
+        "Content-Type": "text/css; charset=utf-8",
+      },
     })
   )
   .get("/assets/app.js", () =>
     new Response(Bun.file(join(PUBLIC_DIR, "app.js")), {
-      headers: { "Content-Type": "application/javascript; charset=utf-8" },
+      headers: {
+        ...SECURITY_HEADERS,
+        "Content-Type": "application/javascript; charset=utf-8",
+      },
     })
   )
 
-  // Public Health endpoint
+  // Public Health endpoint (minimal info only)
   .get("/api/health", () => ({
     ok: true,
     service: "darkin",
-    runtime: `bun ${Bun.version}`,
-    platform: process.platform,
-    cwd: DEFAULT_WORKDIR,
     authRequired: Boolean(AUTH_TOKEN),
-    uptimeSec: Math.floor(process.uptime()),
   }))
+
+  // Cookie session authentication endpoints
+  .post(
+    "/api/auth/login",
+    ({ body, request, set }) => {
+      if (!AUTH_TOKEN) {
+        return { ok: true, authRequired: false };
+      }
+
+      const clientKey = getClientKey(request);
+      const waitSec = getRateLimitRemainingSec(clientKey);
+      if (waitSec > 0) {
+        set.status = 429;
+        return {
+          ok: false,
+          error: `Quá nhiều lần nhập sai. Vui lòng thử lại sau ${waitSec}s.`,
+        };
+      }
+
+      const candidate = body.token.trim();
+      if (!candidate || !safeEqual(candidate, AUTH_TOKEN)) {
+        recordAuthFailure(clientKey);
+        set.status = 401;
+        return { ok: false, error: "Token không chính xác." };
+      }
+
+      clearAuthFailures(clientKey);
+      set.headers["set-cookie"] = buildSessionCookie(request, EXPECTED_SESSION);
+      return { ok: true };
+    },
+    {
+      body: t.Object({
+        token: t.String(),
+      }),
+    }
+  )
+  .post("/api/auth/logout", ({ request, set }) => {
+    set.headers["set-cookie"] = buildClearSessionCookie(request);
+    return { ok: true };
+  })
 
   // Webhooks (use per-project webhookSecret, independent of dashboard token)
   .post(
@@ -117,18 +211,33 @@ const app = new Elysia()
   // Protected API group
   .group("/api", (api) =>
     api
-      .onBeforeHandle(({ request, query, set }) => {
-        if (!isAuthorized(request, query)) {
+      .onBeforeHandle(({ request, set }) => {
+        const auth = checkAuthorization(request);
+        if (!auth.ok) {
+          if (auth.rateLimitedSec) {
+            set.status = 429;
+            return {
+              ok: false,
+              error: `Quá nhiều lần xác thực sai. Thử lại sau ${auth.rateLimitedSec}s.`,
+            };
+          }
           set.status = 401;
           return { ok: false, error: "Unauthorized. Provide a valid DARKIN_TOKEN." };
         }
       })
 
-      // Dashboard overview
+      // Dashboard overview (includes system info behind auth)
       .get("/stats", () => ({
         ok: true,
         stats: getDashboardStats(),
         recentDeployments: listRecentDeployments(15),
+        system: {
+          runtime: `bun ${Bun.version}`,
+          platform: process.platform,
+          cwd: DEFAULT_WORKDIR,
+          uptimeSec: Math.floor(process.uptime()),
+          authRequired: Boolean(AUTH_TOKEN),
+        },
       }))
 
       // Global SSE for live dashboard refresh

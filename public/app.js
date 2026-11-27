@@ -12,7 +12,6 @@
     rawLogs: "",
     slugManuallyEdited: false,
     serverInfo: null,
-    authToken: localStorage.getItem("darkin_token") || "",
   };
 
   const COMMAND_PRESETS = {
@@ -145,13 +144,14 @@ echo "Done!"`,
     if (options.body && !headers["Content-Type"]) {
       headers["Content-Type"] = "application/json";
     }
-    if (state.authToken) {
-      headers["Authorization"] = `Bearer ${state.authToken}`;
-    }
 
-    const res = await fetch(path, { ...options, headers });
+    const res = await fetch(path, {
+      ...options,
+      headers,
+      credentials: "same-origin",
+    });
     if (res.status === 401) {
-      $("authModal").classList.remove("hidden");
+      openAuthModal();
       throw new Error("Cần nhập DARKIN_TOKEN để xác thực");
     }
 
@@ -160,6 +160,12 @@ echo "Done!"`,
       throw new Error(data.error || data.message || `HTTP ${res.status}`);
     }
     return data;
+  }
+
+  function openAuthModal(errorMsg = "") {
+    $("authErrorText").textContent = errorMsg;
+    $("authModal").classList.remove("hidden");
+    setTimeout(() => $("authTokenInput").focus(), 30);
   }
 
   // ---------- Console Log Rendering ----------
@@ -220,17 +226,19 @@ echo "Done!"`,
   }
 
   // ---------- Data Loading ----------
-  async function loadHealth() {
-    try {
-      const res = await fetch("/api/health");
-      const info = await res.json();
-      state.serverInfo = info;
+  function applySystemInfo(info) {
+    if (!info) return;
+    state.serverInfo = info;
+    if (info.runtime && info.platform) {
       $("runtimeBadge").textContent = `${info.runtime} · ${info.platform}`;
-      if (info.cwd && !$("projectWorkDirInput").placeholder.includes(info.cwd)) {
-        $("projectWorkDirInput").placeholder = `VD: ${info.cwd}`;
-      }
-    } catch {
-      // ignore
+    }
+    if (info.cwd && !$("projectWorkDirInput").placeholder.includes(info.cwd)) {
+      $("projectWorkDirInput").placeholder = `VD: ${info.cwd}`;
+    }
+    if (info.authRequired) {
+      $("logoutBtn").classList.remove("hidden");
+    } else {
+      $("logoutBtn").classList.add("hidden");
     }
   }
 
@@ -243,13 +251,16 @@ echo "Done!"`,
       state.projects = projRes.projects || [];
       state.stats = statsRes.stats;
       state.recentDeployments = statsRes.recentDeployments || [];
+      applySystemInfo(statsRes.system);
       renderStats();
       renderProjects();
       renderRecentActivity();
+      return true;
     } catch (err) {
       if (!String(err.message).includes("DARKIN_TOKEN")) {
         showToast(err.message, "error");
       }
+      return false;
     }
   }
 
@@ -522,10 +533,7 @@ echo "Done!"`,
     if (summary) updateConsoleHeader(summary);
     setConsoleText("Đang tải logs...");
 
-    const tokenQs = state.authToken
-      ? `?token=${encodeURIComponent(state.authToken)}`
-      : "";
-    const es = new EventSource(`/api/deployments/${deploymentId}/stream${tokenQs}`);
+    const es = new EventSource(`/api/deployments/${deploymentId}/stream`);
     state.activeLogStream = es;
 
     es.addEventListener("init", (e) => {
@@ -574,10 +582,7 @@ echo "Done!"`,
     if (state.globalEventStream) {
       state.globalEventStream.close();
     }
-    const tokenQs = state.authToken
-      ? `?token=${encodeURIComponent(state.authToken)}`
-      : "";
-    const es = new EventSource(`/api/events${tokenQs}`);
+    const es = new EventSource("/api/events");
     state.globalEventStream = es;
 
     const indicator = $("liveIndicator");
@@ -999,14 +1004,51 @@ echo "Done!"`,
       URL.revokeObjectURL(url);
     });
 
-    // Auth form
+    // Auth form (HttpOnly Cookie session login)
     $("authForm").addEventListener("submit", async (e) => {
       e.preventDefault();
-      state.authToken = $("authTokenInput").value.trim();
-      localStorage.setItem("darkin_token", state.authToken);
-      $("authModal").classList.add("hidden");
-      connectGlobalEvents();
-      await loadOverview();
+      const token = $("authTokenInput").value.trim();
+      const btn = $("authSubmitBtn");
+      $("authErrorText").textContent = "";
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ token }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          $("authErrorText").textContent = data.error || "Đăng nhập thất bại.";
+          return;
+        }
+        $("authTokenInput").value = "";
+        $("authModal").classList.add("hidden");
+        const loaded = await loadOverview();
+        if (loaded) connectGlobalEvents();
+      } catch (err) {
+        $("authErrorText").textContent = err.message || "Lỗi kết nối server.";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    $("logoutBtn").addEventListener("click", async () => {
+      closeLogStream();
+      if (state.globalEventStream) {
+        state.globalEventStream.close();
+        state.globalEventStream = null;
+      }
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "same-origin",
+      }).catch(() => {});
+      state.projects = [];
+      state.recentDeployments = [];
+      renderProjects();
+      renderRecentActivity();
+      openAuthModal();
     });
 
     // Escape closes modal
@@ -1029,8 +1071,14 @@ echo "Done!"`,
   }
 
   // ---------- Init ----------
+  // Clean up any legacy token from older versions
+  try {
+    localStorage.removeItem("darkin_token");
+  } catch {
+    // ignore
+  }
   bindEvents();
-  void loadHealth();
-  void loadOverview();
-  connectGlobalEvents();
+  void loadOverview().then((ok) => {
+    if (ok) connectGlobalEvents();
+  });
 })();

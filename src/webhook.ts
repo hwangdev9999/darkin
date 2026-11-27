@@ -1,13 +1,51 @@
-import { timingSafeEqual } from "node:crypto";
 import { findProjectByRepoName, getProjectBySlug } from "./db";
 import { enqueueDeployment } from "./runner";
+import { safeEqual } from "./security";
 import type { Project, TriggerType } from "./types";
 
-function safeCompare(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, "utf8");
-  const bufB = Buffer.from(b, "utf8");
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
+const MAX_WEBHOOK_BYTES = 1024 * 1024; // 1 MB
+
+async function readLimitedText(
+  request: Request,
+  maxBytes: number
+): Promise<{ text: string; tooLarge: boolean }> {
+  const declaredLen = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
+    return { text: "", tooLarge: true };
+  }
+
+  if (!request.body) {
+    return { text: "", tooLarge: false };
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return { text: "", tooLarge: true };
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return { text: new TextDecoder().decode(combined), tooLarge: false };
 }
 
 function verifyGithubSignature(
@@ -19,7 +57,7 @@ function verifyGithubSignature(
   const hasher = new Bun.CryptoHasher("sha256", secret);
   hasher.update(rawBody);
   const expected = `sha256=${hasher.digest("hex")}`;
-  return safeCompare(expected, signatureHeader);
+  return safeEqual(expected, signatureHeader);
 }
 
 function extractBranch(ref: unknown): string {
@@ -112,7 +150,7 @@ function verifyWebhookAuth(
 
   const glToken = headers.get("x-gitlab-token");
   if (glToken) {
-    return safeCompare(glToken, project.webhookSecret);
+    return safeEqual(glToken, project.webhookSecret);
   }
 
   const customHeader =
@@ -121,11 +159,11 @@ function verifyWebhookAuth(
     headers.get("authorization")?.replace(/^Bearer\s+/i, "");
 
   if (customHeader) {
-    return safeCompare(customHeader, project.webhookSecret);
+    return safeEqual(customHeader, project.webhookSecret);
   }
 
   if (querySecret) {
-    return safeCompare(querySecret, project.webhookSecret);
+    return safeEqual(querySecret, project.webhookSecret);
   }
 
   return false;
@@ -136,7 +174,16 @@ export async function handleWebhookRequest(params: {
   request: Request;
   query: Record<string, string | undefined>;
 }): Promise<{ status: number; body: Record<string, unknown> }> {
-  const rawBody = await params.request.text();
+  const { text: rawBody, tooLarge } = await readLimitedText(
+    params.request,
+    MAX_WEBHOOK_BYTES
+  );
+  if (tooLarge) {
+    return {
+      status: 413,
+      body: { ok: false, error: "Webhook payload too large (max 1MB)" },
+    };
+  }
   let payload: Record<string, any> = {};
 
   if (rawBody.trim()) {

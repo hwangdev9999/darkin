@@ -5,10 +5,10 @@
     "": {
       "name": "darkin",
       "dependencies": {
-        "elysia": "latest",
+        "elysia": "1.4.32",
       },
       "devDependencies": {
-        "bun-types": "latest",
+        "bun-types": "1.4.5",
       },
     },
   },

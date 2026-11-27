@@ -15,6 +15,7 @@ import {
   type TriggerType,
   parseEnvVars,
 } from "./types";
+import { createLogRedactor } from "./security";
 
 export interface DeploymentStreamEvent {
   type: "log" | "status" | "done";
@@ -420,7 +421,15 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
   let logBuffer = "";
   let lastFlushMs = 0;
 
-  const appendLog = (chunk: string) => {
+  const customEnv = parseEnvVars(project.envVars);
+  const redactLog = createLogRedactor({
+    webhookSecret: project.webhookSecret,
+    authToken: Bun.env.DARKIN_TOKEN?.trim(),
+    customEnv,
+  });
+
+  const appendLog = (rawChunk: string) => {
+    const chunk = redactLog(rawChunk);
     if (logBuffer.length < MAX_LOG_CHARS) {
       logBuffer += chunk;
       if (logBuffer.length >= MAX_LOG_CHARS) {
@@ -435,7 +444,7 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
     const now = Date.now();
     if (now - lastFlushMs > 1000) {
       lastFlushMs = now;
-      updateDeployment(deploymentId, { logs: logBuffer });
+      updateDeployment(deploymentId, { logs: redactLog(logBuffer) });
     }
   };
 
@@ -479,7 +488,7 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
       exitCode,
       finishedAt,
       durationMs,
-      logs: logBuffer,
+      logs: redactLog(logBuffer),
     });
 
     activeProcs.delete(deploymentId);
@@ -540,9 +549,12 @@ async function runSingleDeployment(deploymentId: string): Promise<void> {
     return;
   }
 
-  const customEnv = parseEnvVars(project.envVars);
+  const baseEnv: Record<string, string | undefined> = { ...process.env };
+  // Never leak admin authentication token to child build processes
+  delete baseEnv.DARKIN_TOKEN;
+
   const env: Record<string, string | undefined> = {
-    ...process.env,
+    ...baseEnv,
     CI: "true",
     DARKIN_PROJECT: project.name,
     DARKIN_SLUG: project.slug,

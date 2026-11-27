@@ -39,6 +39,9 @@
           </svg>
           <span>Thêm dự án</span>
         </button>
+        <button id="logoutBtn" class="btn btn-ghost btn-sm hidden" type="button" title="Đăng xuất phiên hiện tại">
+          Đăng xuất
+        </button>
       </div>
     </header>
 
@@ -353,10 +356,11 @@
         <p class="muted-sm">Server đang bật bảo vệ bằng <code>DARKIN_TOKEN</code>. Nhập token để tiếp tục.</p>
         <div class="field">
           <label for="authTokenInput">Access Token</label>
-          <input id="authTokenInput" type="password" required placeholder="Nhập DARKIN_TOKEN..." />
+          <input id="authTokenInput" type="password" required autocomplete="current-password" placeholder="Nhập DARKIN_TOKEN..." />
+          <div id="authErrorText" class="dir-check-status dir-err"></div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-primary" type="submit">Đăng nhập</button>
+          <button id="authSubmitBtn" class="btn btn-primary" type="submit">Đăng nhập</button>
         </div>
       </form>
     </div>
