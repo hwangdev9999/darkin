@@ -1,6 +1,11 @@
 import { findProjectByRepoName, getProjectBySlug } from "./db";
-import { enqueueDeployment } from "./runner";
-import { safeEqual } from "./security";
+import { QueueFullError, enqueueDeployment } from "./runner";
+import {
+  getClientKey,
+  getWebhookRateLimitSec,
+  recordWebhookFailure,
+  safeEqual,
+} from "./security";
 import type { Project, TriggerType } from "./types";
 
 const MAX_WEBHOOK_BYTES = 1024 * 1024; // 1 MB
@@ -141,7 +146,8 @@ function verifyWebhookAuth(
   querySecret: string | undefined,
   rawBody: string
 ): boolean {
-  if (!project.webhookSecret) return true;
+  // Fail-closed: never accept unauthenticated webhooks if secret is missing
+  if (!project.webhookSecret) return false;
 
   const ghSig = headers.get("x-hub-signature-256");
   if (ghSig) {
@@ -173,7 +179,20 @@ export async function handleWebhookRequest(params: {
   slug?: string;
   request: Request;
   query: Record<string, string | undefined>;
+  remoteIp?: string | null;
 }): Promise<{ status: number; body: Record<string, unknown> }> {
+  const clientKey = getClientKey(params.request, params.remoteIp);
+  const waitSec = getWebhookRateLimitSec(clientKey);
+  if (waitSec > 0) {
+    return {
+      status: 429,
+      body: {
+        ok: false,
+        error: `Too many failed webhook attempts. Retry after ${waitSec}s.`,
+      },
+    };
+  }
+
   const { text: rawBody, tooLarge } = await readLimitedText(
     params.request,
     MAX_WEBHOOK_BYTES
@@ -223,13 +242,12 @@ export async function handleWebhookRequest(params: {
   }
 
   if (!project) {
+    recordWebhookFailure(clientKey);
     return {
       status: 404,
       body: {
         ok: false,
-        error: slugCandidate
-          ? `Project "${slugCandidate}" not found`
-          : "Project not specified. Use /webhook/:slug or ?project=<slug>",
+        error: "Webhook target not found or unauthorized",
       },
     };
   }
@@ -242,6 +260,7 @@ export async function handleWebhookRequest(params: {
   );
 
   if (!authorized) {
+    recordWebhookFailure(clientKey);
     return {
       status: 401,
       body: {
@@ -290,14 +309,25 @@ export async function handleWebhookRequest(params: {
     };
   }
 
-  const deployment = enqueueDeployment({
-    project,
-    trigger: meta.provider,
-    branch: meta.branch || project.branch,
-    commitHash: meta.commitHash,
-    commitMessage: meta.commitMessage,
-    triggeredBy: meta.triggeredBy,
-  });
+  let deployment;
+  try {
+    deployment = enqueueDeployment({
+      project,
+      trigger: meta.provider,
+      branch: meta.branch || project.branch,
+      commitHash: meta.commitHash,
+      commitMessage: meta.commitMessage,
+      triggeredBy: meta.triggeredBy,
+    });
+  } catch (err) {
+    if (err instanceof QueueFullError) {
+      return {
+        status: 429,
+        body: { ok: false, error: err.message },
+      };
+    }
+    throw err;
+  }
 
   return {
     status: 202,

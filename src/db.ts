@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   type CreateProjectInput,
@@ -18,9 +18,18 @@ import {
 } from "./types";
 
 const DB_PATH = resolve(Bun.env.DARKIN_DB ?? "data/darkin.sqlite");
-mkdirSync(dirname(DB_PATH), { recursive: true });
+mkdirSync(dirname(DB_PATH), { recursive: true, mode: 0o700 });
 
 export const db = new Database(DB_PATH, { create: true });
+
+if (process.platform !== "win32") {
+  try {
+    chmodSync(dirname(DB_PATH), 0o700);
+    chmodSync(DB_PATH, 0o600);
+  } catch {
+    // Ignore on filesystems that do not support POSIX chmod
+  }
+}
 
 db.exec(`
   PRAGMA journal_mode = WAL;

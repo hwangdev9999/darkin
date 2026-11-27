@@ -13,6 +13,7 @@ import {
   type Project,
   type ShellType,
   type TriggerType,
+  generateSecret,
   parseEnvVars,
 } from "./types";
 import { createLogRedactor } from "./security";
@@ -45,6 +46,7 @@ type StreamListener = (event: DeploymentStreamEvent) => void;
 type GlobalListener = (event: GlobalEvent) => void;
 
 const MAX_LOG_CHARS = 500_000;
+export const MAX_QUEUE_PER_PROJECT = 5;
 
 const deploymentListeners = new Map<string, Set<StreamListener>>();
 const globalListeners = new Set<GlobalListener>();
@@ -176,9 +178,10 @@ function prepareScriptExecution(
 
   // Normalize line endings so scripts pasted from Windows browsers run cleanly on Linux
   const normalizedUnix = rawScript.replace(/\r\n/g, "\n");
+  const nonce = generateSecret(8);
 
   if (!isWin && shell === "auto" && normalizedUnix.startsWith("#!")) {
-    const scriptPath = join(tmpdir(), `darkin-${deploymentId}.sh`);
+    const scriptPath = join(tmpdir(), `darkin-${deploymentId}-${nonce}.sh`);
     writeFileSync(scriptPath, normalizedUnix + "\n", { encoding: "utf8", mode: 0o700 });
     chmodSync(scriptPath, 0o700);
     const firstLine = normalizedUnix.split("\n")[0]?.trim() || "#!";
@@ -187,9 +190,9 @@ function prepareScriptExecution(
 
   switch (effective) {
     case "cmd": {
-      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.cmd`);
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}-${nonce}.cmd`);
       const content = rawScript.replace(/\r?\n/g, "\r\n") + "\r\n";
-      writeFileSync(scriptPath, content, "utf8");
+      writeFileSync(scriptPath, content, { encoding: "utf8", mode: 0o700 });
       return {
         cmdArgs: ["cmd", "/c", scriptPath],
         scriptPath,
@@ -197,9 +200,9 @@ function prepareScriptExecution(
       };
     }
     case "powershell": {
-      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.ps1`);
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}-${nonce}.ps1`);
       const content = `$ErrorActionPreference = 'Stop'\r\n${rawScript.replace(/\r?\n/g, "\r\n")}\r\n`;
-      writeFileSync(scriptPath, content, "utf8");
+      writeFileSync(scriptPath, content, { encoding: "utf8", mode: 0o700 });
       return {
         cmdArgs: [
           "powershell",
@@ -215,8 +218,8 @@ function prepareScriptExecution(
       };
     }
     case "bash": {
-      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.sh`);
-      writeFileSync(scriptPath, normalizedUnix + "\n", "utf8");
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}-${nonce}.sh`);
+      writeFileSync(scriptPath, normalizedUnix + "\n", { encoding: "utf8", mode: 0o700 });
       return {
         cmdArgs: ["bash", "-e", "-o", "pipefail", scriptPath],
         scriptPath,
@@ -225,8 +228,8 @@ function prepareScriptExecution(
     }
     case "sh":
     default: {
-      const scriptPath = join(tmpdir(), `darkin-${deploymentId}.sh`);
-      writeFileSync(scriptPath, normalizedUnix + "\n", "utf8");
+      const scriptPath = join(tmpdir(), `darkin-${deploymentId}-${nonce}.sh`);
+      writeFileSync(scriptPath, normalizedUnix + "\n", { encoding: "utf8", mode: 0o700 });
       return {
         cmdArgs: ["sh", "-e", scriptPath],
         scriptPath,
@@ -263,6 +266,13 @@ async function killProcessTree(proc: Bun.Subprocess): Promise<void> {
   }
 }
 
+export class QueueFullError extends Error {
+  constructor(projectName: string) {
+    super(`Build queue for "${projectName}" is full (max ${MAX_QUEUE_PER_PROJECT} pending builds).`);
+    this.name = "QueueFullError";
+  }
+}
+
 export function enqueueDeployment(params: {
   project: Project;
   trigger: TriggerType;
@@ -271,6 +281,11 @@ export function enqueueDeployment(params: {
   commitMessage?: string;
   triggeredBy?: string;
 }): Deployment {
+  const existingQueue = projectQueues.get(params.project.id);
+  if (existingQueue && existingQueue.length >= MAX_QUEUE_PER_PROJECT) {
+    throw new QueueFullError(params.project.name);
+  }
+
   const deployment = createDeploymentRecord({
     projectId: params.project.id,
     trigger: params.trigger,

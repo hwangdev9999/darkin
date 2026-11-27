@@ -9,13 +9,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${PORT:-7554}:7554"
+      # Mặc định chỉ lắng nghe trên 127.0.0.1 (tránh Docker vượt qua tường lửa UFW).
+      # Dùng Nginx Reverse Proxy + HTTPS để public ra ngoài, hoặc đặt BIND_HOST=0.0.0.0 trong .env nếu thực sự cần.
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-7554}:7554"
     environment:
       HOST: 0.0.0.0
       PORT: 7554
       DARKIN_DB: /app/data/darkin.sqlite
       DARKIN_WORKDIR: /www/wwwroot
       DARKIN_TOKEN: ${DARKIN_TOKEN:-}
+      DARKIN_TRUST_PROXY: ${DARKIN_TRUST_PROXY:-false}
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
     volumes:
       # Lưu trữ SQLite (cấu hình dự án & lịch sử build)

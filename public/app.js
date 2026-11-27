@@ -64,7 +64,8 @@ echo "Done!"`,
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function slugify(text) {
@@ -237,8 +238,10 @@ echo "Done!"`,
     }
     if (info.authRequired) {
       $("logoutBtn").classList.remove("hidden");
+      $("authWarningBanner").classList.add("hidden");
     } else {
       $("logoutBtn").classList.add("hidden");
+      $("authWarningBanner").classList.remove("hidden");
     }
   }
 
@@ -849,8 +852,11 @@ echo "Done!"`,
       const editBtn = e.target.closest("[data-edit-project]");
       if (editBtn) {
         const id = editBtn.getAttribute("data-edit-project");
-        const proj = state.projects.find((p) => p.id === id);
-        if (proj) openProjectModal(proj);
+        void apiFetch(`/api/projects/${id}`)
+          .then((res) => {
+            if (res.project) openProjectModal(res.project);
+          })
+          .catch((err) => showToast(err.message, "error"));
       }
     });
 

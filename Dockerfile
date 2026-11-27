@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     unzip \
   && rm -rf /var/lib/apt/lists/* \
-  && git config --system --add safe.directory '*'
+  && git config --system --add safe.directory '*' \
+  && (ssh-keyscan -H github.com gitlab.com bitbucket.org >> /etc/ssh/ssh_known_hosts 2>/dev/null || true)
 
 # Docker CLI + Compose plugin (used when /var/run/docker.sock is mounted)
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker

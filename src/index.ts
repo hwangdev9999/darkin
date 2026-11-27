@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   clearProjectDeployments,
@@ -15,6 +15,7 @@ import {
   updateProject,
 } from "./db";
 import {
+  QueueFullError,
   cancelDeployment,
   emitGlobalEvent,
   enqueueDeployment,
@@ -35,6 +36,7 @@ import {
   parseCookie,
   recordAuthFailure,
   safeEqual,
+  verifySameOrigin,
 } from "./security";
 import { handleWebhookRequest } from "./webhook";
 
@@ -44,19 +46,63 @@ const AUTH_TOKEN = Bun.env.DARKIN_TOKEN?.trim() || "";
 const EXPECTED_SESSION = AUTH_TOKEN ? deriveSessionValue(AUTH_TOKEN) : "";
 const DEFAULT_WORKDIR = Bun.env.DARKIN_WORKDIR?.trim() || process.cwd();
 const PUBLIC_DIR = resolve(import.meta.dir, "..", "public");
+const MAX_SSE_CLIENTS = 50;
+
+let activeSseClients = 0;
 
 const recovered = recoverStuckDeployments();
 if (recovered > 0) {
   console.log(`[darkin] Recovered ${recovered} interrupted deployment(s).`);
 }
 
-function checkAuthorization(request: Request): {
+function readGitBranchSafely(targetDir: string): { isGit: boolean; branch: string } {
+  const gitEntry = join(targetDir, ".git");
+  if (!existsSync(gitEntry)) {
+    return { isGit: false, branch: "" };
+  }
+
+  try {
+    let gitDir = gitEntry;
+    const st = statSync(gitEntry);
+    if (st.isFile()) {
+      const pointer = readFileSync(gitEntry, "utf8").trim();
+      const match = /^gitdir:\s*(.+)$/i.exec(pointer);
+      if (match?.[1]) {
+        gitDir = resolve(targetDir, match[1].trim());
+      }
+    }
+
+    const headPath = join(gitDir, "HEAD");
+    if (!existsSync(headPath)) {
+      return { isGit: true, branch: "" };
+    }
+    const head = readFileSync(headPath, "utf8").trim();
+    if (head.startsWith("ref: refs/heads/")) {
+      return { isGit: true, branch: head.slice("ref: refs/heads/".length).trim() };
+    }
+    return { isGit: true, branch: head.slice(0, 8) };
+  } catch {
+    return { isGit: true, branch: "" };
+  }
+}
+
+function checkAuthorization(
+  request: Request,
+  remoteIp?: string | null
+): {
   ok: boolean;
+  viaHeader?: boolean;
   rateLimitedSec?: number;
 } {
-  if (!AUTH_TOKEN) return { ok: true };
+  const headerToken =
+    request.headers.get("x-darkin-token") ??
+    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
 
-  const clientKey = getClientKey(request);
+  if (!AUTH_TOKEN) {
+    return { ok: true, viaHeader: Boolean(headerToken) };
+  }
+
+  const clientKey = getClientKey(request, remoteIp);
   const waitSec = getRateLimitRemainingSec(clientKey);
   if (waitSec > 0) {
     return { ok: false, rateLimitedSec: waitSec };
@@ -64,17 +110,13 @@ function checkAuthorization(request: Request): {
 
   const cookieVal = parseCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME);
   if (cookieVal && safeEqual(cookieVal, EXPECTED_SESSION)) {
-    return { ok: true };
+    return { ok: true, viaHeader: false };
   }
-
-  const headerToken =
-    request.headers.get("x-darkin-token") ??
-    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
 
   if (headerToken) {
     if (safeEqual(headerToken, AUTH_TOKEN)) {
       clearAuthFailures(clientKey);
-      return { ok: true };
+      return { ok: true, viaHeader: true };
     }
     recordAuthFailure(clientKey);
   }
@@ -148,11 +190,16 @@ const app = new Elysia()
   .post(
     "/api/auth/login",
     ({ body, request, set }) => {
+      const remoteIp = app.server?.requestIP(request)?.address ?? null;
+      if (!verifySameOrigin(request, remoteIp)) {
+        set.status = 403;
+        return { ok: false, error: "Forbidden: Cross-origin login blocked." };
+      }
       if (!AUTH_TOKEN) {
         return { ok: true, authRequired: false };
       }
 
-      const clientKey = getClientKey(request);
+      const clientKey = getClientKey(request, remoteIp);
       const waitSec = getRateLimitRemainingSec(clientKey);
       if (waitSec > 0) {
         set.status = 429;
@@ -170,17 +217,22 @@ const app = new Elysia()
       }
 
       clearAuthFailures(clientKey);
-      set.headers["set-cookie"] = buildSessionCookie(request, EXPECTED_SESSION);
+      set.headers["set-cookie"] = buildSessionCookie(request, EXPECTED_SESSION, remoteIp);
       return { ok: true };
     },
     {
       body: t.Object({
-        token: t.String(),
+        token: t.String({ maxLength: 512 }),
       }),
     }
   )
   .post("/api/auth/logout", ({ request, set }) => {
-    set.headers["set-cookie"] = buildClearSessionCookie(request);
+    const remoteIp = app.server?.requestIP(request)?.address ?? null;
+    if (!verifySameOrigin(request, remoteIp)) {
+      set.status = 403;
+      return { ok: false, error: "Forbidden: Cross-origin request blocked." };
+    }
+    set.headers["set-cookie"] = buildClearSessionCookie(request, remoteIp);
     return { ok: true };
   })
 
@@ -188,7 +240,8 @@ const app = new Elysia()
   .post(
     "/webhook",
     async ({ request, query, set }) => {
-      const res = await handleWebhookRequest({ request, query });
+      const remoteIp = app.server?.requestIP(request)?.address ?? null;
+      const res = await handleWebhookRequest({ request, query, remoteIp });
       set.status = res.status;
       return res.body;
     },
@@ -197,10 +250,12 @@ const app = new Elysia()
   .post(
     "/webhook/:slug",
     async ({ params, request, query, set }) => {
+      const remoteIp = app.server?.requestIP(request)?.address ?? null;
       const res = await handleWebhookRequest({
         slug: params.slug,
         request,
         query,
+        remoteIp,
       });
       set.status = res.status;
       return res.body;
@@ -212,7 +267,8 @@ const app = new Elysia()
   .group("/api", (api) =>
     api
       .onBeforeHandle(({ request, set }) => {
-        const auth = checkAuthorization(request);
+        const remoteIp = app.server?.requestIP(request)?.address ?? null;
+        const auth = checkAuthorization(request, remoteIp);
         if (!auth.ok) {
           if (auth.rateLimitedSec) {
             set.status = 429;
@@ -223,6 +279,15 @@ const app = new Elysia()
           }
           set.status = 401;
           return { ok: false, error: "Unauthorized. Provide a valid DARKIN_TOKEN." };
+        }
+
+        // Enforce Same-Origin CSRF protection for browser/cookie-based mutations
+        if (!auth.viaHeader && !verifySameOrigin(request, remoteIp)) {
+          set.status = 403;
+          return {
+            ok: false,
+            error: "Forbidden: Cross-origin request blocked (CSRF protection).",
+          };
         }
       })
 
@@ -241,9 +306,16 @@ const app = new Elysia()
       }))
 
       // Global SSE for live dashboard refresh
-      .get("/events", ({ request }) => {
+      .get("/events", ({ request, set }) => {
+        if (activeSseClients >= MAX_SSE_CLIENTS) {
+          set.status = 429;
+          return { ok: false, error: "Too many active live connections." };
+        }
+
         const encoder = new TextEncoder();
         let cleanup: (() => void) | null = null;
+        let closed = false;
+        activeSseClients += 1;
 
         const stream = new ReadableStream({
           start(controller) {
@@ -272,6 +344,9 @@ const app = new Elysia()
             }, 15_000);
 
             cleanup = () => {
+              if (closed) return;
+              closed = true;
+              activeSseClients = Math.max(0, activeSseClients - 1);
               clearInterval(keepAlive);
               unsub();
             };
@@ -293,10 +368,10 @@ const app = new Elysia()
         return new Response(stream, { headers: sseHeaders() });
       })
 
-      // Check working directory helper for UI
+      // Check working directory helper for UI (reads .git/HEAD directly without spawning git)
       .post(
         "/utils/check-dir",
-        async ({ body }) => {
+        ({ body }) => {
           const targetPath = body.path.trim();
           if (!targetPath) {
             return { ok: true, exists: false, isDirectory: false, isGit: false, branch: "" };
@@ -304,37 +379,29 @@ const app = new Elysia()
 
           const exists = existsSync(targetPath);
           const isDirectory = exists && statSync(targetPath).isDirectory();
-          const isGit = isDirectory && existsSync(join(targetPath, ".git"));
-          let branch = "";
+          const gitInfo = isDirectory
+            ? readGitBranchSafely(targetPath)
+            : { isGit: false, branch: "" };
 
-          if (isGit) {
-            try {
-              const proc = Bun.spawn(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
-                cwd: targetPath,
-                stdout: "pipe",
-                stderr: "ignore",
-              });
-              const out = await new Response(proc.stdout).text();
-              await proc.exited;
-              branch = out.trim();
-            } catch {
-              // git might not be installed
-            }
-          }
-
-          return { ok: true, exists, isDirectory, isGit, branch };
+          return {
+            ok: true,
+            exists,
+            isDirectory,
+            isGit: gitInfo.isGit,
+            branch: gitInfo.branch,
+          };
         },
         {
           body: t.Object({
-            path: t.String(),
+            path: t.String({ maxLength: 500 }),
           }),
         }
       )
 
-      // Projects CRUD
+      // Projects CRUD (omit secrets from overview list; full project returned by GET /api/projects/:id)
       .get("/projects", () => ({
         ok: true,
-        projects: listProjects(),
+        projects: listProjects().map(({ webhookSecret: _s, envVars: _e, ...safe }) => safe),
       }))
 
       .post(
@@ -355,19 +422,19 @@ const app = new Elysia()
         },
         {
           body: t.Object({
-            name: t.String({ minLength: 1 }),
-            slug: t.Optional(t.String()),
-            description: t.Optional(t.String()),
-            repoUrl: t.Optional(t.String()),
-            branch: t.Optional(t.String()),
-            workDir: t.String({ minLength: 1 }),
-            commands: t.String({ minLength: 1 }),
+            name: t.String({ minLength: 1, maxLength: 120 }),
+            slug: t.Optional(t.String({ maxLength: 80 })),
+            description: t.Optional(t.String({ maxLength: 500 })),
+            repoUrl: t.Optional(t.String({ maxLength: 500 })),
+            branch: t.Optional(t.String({ maxLength: 120 })),
+            workDir: t.String({ minLength: 1, maxLength: 500 }),
+            commands: t.String({ minLength: 1, maxLength: 65536 }),
             runMode: t.Optional(RunModeSchema),
-            envVars: t.Optional(t.String()),
+            envVars: t.Optional(t.String({ maxLength: 32768 })),
             shell: t.Optional(ShellSchema),
-            webhookSecret: t.Optional(t.String()),
+            webhookSecret: t.Optional(t.String({ maxLength: 256 })),
             autoDeploy: t.Optional(t.Boolean()),
-            timeoutSec: t.Optional(t.Number()),
+            timeoutSec: t.Optional(t.Number({ minimum: 10, maximum: 86400 })),
           }),
         }
       )
@@ -403,19 +470,19 @@ const app = new Elysia()
         },
         {
           body: t.Object({
-            name: t.Optional(t.String({ minLength: 1 })),
-            slug: t.Optional(t.String()),
-            description: t.Optional(t.String()),
-            repoUrl: t.Optional(t.String()),
-            branch: t.Optional(t.String()),
-            workDir: t.Optional(t.String({ minLength: 1 })),
-            commands: t.Optional(t.String({ minLength: 1 })),
+            name: t.Optional(t.String({ minLength: 1, maxLength: 120 })),
+            slug: t.Optional(t.String({ maxLength: 80 })),
+            description: t.Optional(t.String({ maxLength: 500 })),
+            repoUrl: t.Optional(t.String({ maxLength: 500 })),
+            branch: t.Optional(t.String({ maxLength: 120 })),
+            workDir: t.Optional(t.String({ minLength: 1, maxLength: 500 })),
+            commands: t.Optional(t.String({ minLength: 1, maxLength: 65536 })),
             runMode: t.Optional(RunModeSchema),
-            envVars: t.Optional(t.String()),
+            envVars: t.Optional(t.String({ maxLength: 32768 })),
             shell: t.Optional(ShellSchema),
-            webhookSecret: t.Optional(t.String()),
+            webhookSecret: t.Optional(t.String({ maxLength: 256 })),
             autoDeploy: t.Optional(t.Boolean()),
-            timeoutSec: t.Optional(t.Number()),
+            timeoutSec: t.Optional(t.Number({ minimum: 10, maximum: 86400 })),
           }),
         }
       )
@@ -450,22 +517,30 @@ const app = new Elysia()
             set.status = 404;
             return { ok: false, error: "Project not found" };
           }
-          const deployment = enqueueDeployment({
-            project,
-            trigger: "manual",
-            branch: body?.branch || project.branch,
-            commitMessage: body?.note || "",
-            triggeredBy: body?.triggeredBy || "Dashboard UI",
-          });
-          set.status = 202;
-          return { ok: true, deployment };
+          try {
+            const deployment = enqueueDeployment({
+              project,
+              trigger: "manual",
+              branch: body?.branch || project.branch,
+              commitMessage: body?.note || "",
+              triggeredBy: body?.triggeredBy || "Dashboard UI",
+            });
+            set.status = 202;
+            return { ok: true, deployment };
+          } catch (err) {
+            if (err instanceof QueueFullError) {
+              set.status = 429;
+              return { ok: false, error: err.message };
+            }
+            throw err;
+          }
         },
         {
           body: t.Optional(
             t.Object({
-              branch: t.Optional(t.String()),
-              note: t.Optional(t.String()),
-              triggeredBy: t.Optional(t.String()),
+              branch: t.Optional(t.String({ maxLength: 120 })),
+              note: t.Optional(t.String({ maxLength: 500 })),
+              triggeredBy: t.Optional(t.String({ maxLength: 120 })),
             })
           ),
         }
@@ -510,9 +585,21 @@ const app = new Elysia()
           set.status = 404;
           return { ok: false, error: "Deployment not found" };
         }
+        if (activeSseClients >= MAX_SSE_CLIENTS) {
+          set.status = 429;
+          return { ok: false, error: "Too many active live log connections." };
+        }
 
         const encoder = new TextEncoder();
         let cleanup: (() => void) | null = null;
+        let closed = false;
+        activeSseClients += 1;
+
+        const releaseClient = () => {
+          if (closed) return;
+          closed = true;
+          activeSseClients = Math.max(0, activeSseClients - 1);
+        };
 
         const stream = new ReadableStream({
           start(controller) {
@@ -547,6 +634,7 @@ const app = new Elysia()
                 durationMs: deployment.durationMs,
                 finishedAt: deployment.finishedAt,
               });
+              releaseClient();
               controller.close();
               return;
             }
@@ -581,6 +669,7 @@ const app = new Elysia()
             }, 15_000);
 
             cleanup = () => {
+              releaseClient();
               clearInterval(keepAlive);
               unsub();
             };
@@ -595,7 +684,7 @@ const app = new Elysia()
             });
           },
           cancel() {
-            cleanup?.();
+            cleanup ? cleanup() : releaseClient();
           },
         });
 
@@ -614,6 +703,10 @@ app.listen(
     console.log(`Darkin - Deploy Man is running at http://${HOST}:${PORT}`);
     if (AUTH_TOKEN) {
       console.log(`[darkin] Dashboard authentication enabled (DARKIN_TOKEN is set)`);
+    } else {
+      console.warn(
+        `[darkin] WARNING: DARKIN_TOKEN is not set! Do NOT expose port ${PORT} publicly without setting DARKIN_TOKEN.`
+      );
     }
   }
 );
